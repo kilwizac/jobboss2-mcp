@@ -1,0 +1,74 @@
+{
+  "name": "jobboss2-mcp",
+  "version": "0.1.0",
+  "description": "Model Context Protocol server for the JobBOSS² Public API",
+  "type": "module",
+  "sideEffects": false,
+  "license": "MIT",
+  "private": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kilwizac/mcp-jobboss2.git"
+  },
+  "homepage": "https://github.com/kilwizac/mcp-jobboss2#readme",
+  "bugs": "https://github.com/kilwizac/mcp-jobboss2/issues",
+  "bin": {
+    "jobboss2-mcp": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md",
+    "SECURITY.md"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "packageManager": "pnpm@11.21.0",
+  "scripts": {
+    "build": "pnpm clean && tsc -p tsconfig.build.json",
+    "check": "pnpm typecheck && pnpm lint && pnpm format && pnpm test && pnpm build",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "dev": "tsx src/cli.ts",
+    "format": "prettier --check .",
+    "format:write": "prettier --write .",
+    "lint": "oxlint --deny-warnings .",
+    "prepack": "pnpm build",
+    "prepublishOnly": "pnpm check",
+    "start": "node dist/cli.js",
+    "sync:openapi": "tsx scripts/sync-openapi.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "oxlint": "^1.80.0",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  },
+  "keywords": [
+    "jobboss2",
+    "jobboss",
+    "mcp",
+    "model-context-protocol",
+    "eci",
+    "manufacturing",
+    "erp"
+  ]
+}

@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+
+  package:
+    name: Package smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: mkdir package-artifacts && pnpm pack --pack-destination package-artifacts
+      - run: tar -tzf package-artifacts/*.tgz | grep -q package/dist/cli.js
+      - run:
+          mkdir /tmp/jobboss2-mcp-smoke && printf '{"type":"module"}\n' >
+          /tmp/jobboss2-mcp-smoke/package.json
+      - run:
+          pnpm --dir /tmp/jobboss2-mcp-smoke add "$(realpath package-artifacts/*.tgz)"
+          typescript@7.0.2
+      - run:
+          printf 'import { loadConfig } from "jobboss2-mcp";\nvoid loadConfig;\n' >
+          /tmp/jobboss2-mcp-smoke/index.ts
+      - run:
+          pnpm --dir /tmp/jobboss2-mcp-smoke exec tsc --noEmit --strict --module nodenext
+          --moduleResolution nodenext --target es2023 index.ts
