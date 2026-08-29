@@ -4,6 +4,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Keep @types/node on the major of the minimum supported Node runtime (see engines).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     groups:
       development-dependencies:
         dependency-type: development
