@@ -8,10 +8,10 @@
   "private": false,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kilwizac/mcp-jobboss2.git"
+    "url": "git+https://github.com/kilwizac/jobboss2-mcp.git"
   },
-  "homepage": "https://github.com/kilwizac/mcp-jobboss2#readme",
-  "bugs": "https://github.com/kilwizac/mcp-jobboss2/issues",
+  "homepage": "https://github.com/kilwizac/jobboss2-mcp#readme",
+  "bugs": "https://github.com/kilwizac/jobboss2-mcp/issues",
   "bin": {
     "jobboss2-mcp": "dist/cli.js"
   },
