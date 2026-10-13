@@ -49,18 +49,18 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
-    "zod": "^4.4.3"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@types/node": "^22.20.1",
-    "oxlint": "^1.80.0",
-    "prettier": "^3.9.6",
-    "tsx": "^4.23.12",
+    "@types/node": "^22.20.4",
+    "oxlint": "^1.85.0",
+    "prettier": "^3.9.9",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.1"
   },
   "keywords": [
     "jobboss2",
