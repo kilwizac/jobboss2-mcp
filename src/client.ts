@@ -21,7 +21,7 @@ export type PathValue = string | number;
 export type QueryValue = string | number | boolean;
 
 export type JobBoss2Request = Readonly<{
-  body?: JsonValue;
+  body?: JsonValue | FormData;
   operation: CatalogOperation;
   pathParameters?: Readonly<Record<string, PathValue>>;
   query?: Readonly<Record<string, QueryValue | undefined>>;
@@ -116,8 +116,10 @@ export class JobBoss2Client {
       "user-agent": `jobboss2-mcp/${SERVER_VERSION}`,
     };
 
-    let body: string | undefined;
-    if (request.body !== undefined) {
+    let body: string | FormData | undefined;
+    if (request.body instanceof FormData) {
+      body = request.body;
+    } else if (request.body !== undefined) {
       headers["content-type"] = request.operation.requestContentType ?? "application/json";
       body = JSON.stringify(request.body);
     }

@@ -12,7 +12,7 @@ const queryParameterSchema = z.object({
 const operationSchema = z.object({
   bodyRequired: z.boolean(),
   description: z.string(),
-  method: z.enum(["GET", "POST", "PATCH"]),
+  method: z.enum(["GET", "POST", "PATCH", "DELETE"]),
   path: z.string().startsWith("/"),
   pathParameters: z.array(z.string()),
   queryParameters: z.array(queryParameterSchema),
@@ -25,6 +25,7 @@ const operationSchema = z.object({
 const resourceSchema = z.object({
   operations: z.object({
     create: operationSchema.optional(),
+    delete: operationSchema.optional(),
     get: operationSchema.optional(),
     list: operationSchema.optional(),
     update: operationSchema.optional(),
@@ -32,7 +33,14 @@ const resourceSchema = z.object({
   title: z.string(),
 });
 
+const documentOperationsSchema = z.object({
+  attach: operationSchema,
+  detach: operationSchema,
+  list: operationSchema,
+});
+
 const catalogSchema = z.object({
+  actions: z.record(z.string(), operationSchema),
   api: z.object({
     openapiVersion: z.string(),
     serverUrl: z.url(),
@@ -40,17 +48,20 @@ const catalogSchema = z.object({
     version: z.string(),
   }),
   documentationUrl: z.url(),
+  documents: z.record(z.string(), documentOperationsSchema),
   issuingMaterials: z.record(z.string(), operationSchema),
   reports: z.record(z.string(), operationSchema),
   resources: z.record(z.string(), resourceSchema),
   sourceUrl: z.url(),
   undocumented: z.record(z.string(), operationSchema),
+  views: z.record(z.string(), operationSchema),
 });
 
 export const catalog = catalogSchema.parse(rawCatalog);
 
 export type Catalog = typeof catalog;
 export type CatalogOperation = z.infer<typeof operationSchema>;
+export type DocumentOperation = keyof z.infer<typeof documentOperationsSchema>;
 export type Resource = z.infer<typeof resourceSchema>;
 export type ResourceOperation = keyof Resource["operations"];
 
@@ -68,6 +79,16 @@ export const listResourceNames = namesWithOperation("list");
 export const getResourceNames = namesWithOperation("get");
 export const createResourceNames = namesWithOperation("create");
 export const updateResourceNames = namesWithOperation("update");
+export const deleteResourceNames = namesWithOperation("delete");
+export const actionNames = Object.keys(catalog.actions).sort((left, right) =>
+  left.localeCompare(right),
+);
+export const viewNames = Object.keys(catalog.views).sort((left, right) =>
+  left.localeCompare(right),
+);
+export const documentResourceNames = Object.keys(catalog.documents).sort((left, right) =>
+  left.localeCompare(right),
+);
 export const issuingMaterialLookupNames = Object.keys(catalog.issuingMaterials)
   .filter((name) => name.startsWith("list_"))
   .sort((left, right) => left.localeCompare(right));
@@ -89,6 +110,17 @@ export function getResourceOperation(
   const operation = resource?.operations[operationName];
   if (!operation) {
     throw new Error(`Catalog operation ${resourceName}.${operationName} does not exist`);
+  }
+  return operation;
+}
+
+export function getDocumentOperation(
+  resourceName: string,
+  operationName: DocumentOperation,
+): CatalogOperation {
+  const operation = catalog.documents[resourceName]?.[operationName];
+  if (!operation) {
+    throw new Error(`Catalog document operation ${resourceName}.${operationName} does not exist`);
   }
   return operation;
 }

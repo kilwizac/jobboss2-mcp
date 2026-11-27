@@ -2,12 +2,15 @@ import { writeFile } from "node:fs/promises";
 
 import { z } from "zod";
 
-const OPENAPI_URL = "https://api-jb2.integrations.ecimanufacturing.com/openapi.json";
+const OPENAPI_URL = "https://api-jb2.integrations.ecimanufacturing.com/openapi/v2.json";
 const DOCUMENTATION_URL = "https://integrations.ecimanufacturing.com/api.html?family=jb2";
 const OUTPUT_URL = new URL("../src/generated/catalog.json", import.meta.url);
-const HTTP_METHODS = ["get", "post", "patch"] as const;
+const API_PREFIX = "/api/v2/";
+const HTTP_METHODS = ["get", "post", "patch", "delete"] as const;
 const ALL_HTTP_METHODS = ["get", "post", "put", "patch", "delete", "options", "head", "trace"];
 const SUPPORTED_HTTP_METHODS = new Set<string>(HTTP_METHODS);
+const UNDOCUMENTED_TAGS = new Set(["null", "Authentication", "ShopView"]);
+const OMITTED_QUERY_PARAMETERS = new Set(["useCompanyTime"]);
 
 const parameterSchema = z
   .object({
@@ -58,7 +61,9 @@ const requestBodySchema = z
   .passthrough();
 
 type CatalogOperation = ReturnType<typeof toCatalogOperation>;
-type ResourceOperation = "create" | "get" | "list" | "update";
+type ResourceOperation = "create" | "delete" | "get" | "list" | "update";
+type DocumentOperation = "attach" | "detach" | "list";
+type HttpMethod = (typeof HTTP_METHODS)[number];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -128,7 +133,8 @@ function getRequestSchema(
   const contentType = contentTypes.includes("application/json")
     ? "application/json"
     : (contentTypes[0] ?? null);
-  const mediaType = contentType ? parsed.data.content[contentType] : undefined;
+  const mediaType =
+    contentType === "application/json" ? parsed.data.content[contentType] : undefined;
   const schema = mediaType?.schema;
 
   return {
@@ -139,7 +145,7 @@ function getRequestSchema(
 }
 
 function toCatalogOperation(
-  method: (typeof HTTP_METHODS)[number],
+  method: HttpMethod,
   path: string,
   operation: z.infer<typeof operationSchema>,
   components: Record<string, Record<string, unknown>>,
@@ -155,7 +161,9 @@ function toCatalogOperation(
       .filter((parameter) => parameter.in === "path")
       .map((parameter) => parameter.name),
     queryParameters: (operation.parameters ?? [])
-      .filter((parameter) => parameter.in === "query")
+      .filter(
+        (parameter) => parameter.in === "query" && !OMITTED_QUERY_PARAMETERS.has(parameter.name),
+      )
       .map((parameter) => ({
         description: parameter.description ?? "",
         name: parameter.name,
@@ -172,21 +180,76 @@ function toCatalogOperation(
   };
 }
 
-function getResourceOperation(
-  method: (typeof HTTP_METHODS)[number],
-  operation: z.infer<typeof operationSchema>,
-): ResourceOperation {
+function isParameterSegment(segment: string): boolean {
+  return segment.startsWith("{") && segment.endsWith("}");
+}
+
+function relativePath(path: string): string {
+  if (!path.startsWith(API_PREFIX)) throw new Error(`${path} is outside ${API_PREFIX}`);
+  return path.slice(API_PREFIX.length);
+}
+
+function hasQueryParameter(operation: z.infer<typeof operationSchema>, name: string): boolean {
+  return (operation.parameters ?? []).some(
+    (parameter) => parameter.in === "query" && parameter.name.toLowerCase() === name,
+  );
+}
+
+function getResourceOperation(method: HttpMethod, path: string): ResourceOperation {
+  if (method === "delete") return "delete";
   if (method === "patch") return "update";
   if (method === "post") return "create";
+  return path.split("/").some(isParameterSegment) ? "get" : "list";
+}
 
-  const isList = (operation.parameters ?? []).some(
-    (parameter) => parameter.in === "query" && parameter.name === "filters",
+function isView(
+  operation: z.infer<typeof operationSchema>,
+  path: string,
+  siblings: readonly {
+    method: HttpMethod;
+    operation: z.infer<typeof operationSchema>;
+    path: string;
+  }[],
+): boolean {
+  if (hasQueryParameter(operation, "fields")) return false;
+  const segments = path.split("/");
+  if (!isParameterSegment(segments.at(-1) ?? "")) return true;
+  const parent = segments.slice(0, -1).join("/");
+  return !siblings.some(
+    (sibling) =>
+      sibling.method === "get" &&
+      sibling.path === parent &&
+      hasQueryParameter(sibling.operation, "fields"),
   );
-  return isList ? "list" : "get";
+}
+
+function isRecordAction(path: string, siblingPaths: readonly string[]): boolean {
+  const segments = path.split("/");
+  const last = segments.at(-1) ?? "";
+  const parent = segments.at(-2) ?? "";
+  if (isParameterSegment(last) || !isParameterSegment(parent)) return false;
+  return !siblingPaths.some((sibling) => sibling.split("/").includes(last));
+}
+
+function getDocumentOwner(path: string): { operation: string; resource: string } {
+  const segments = relativePath(path).split("/");
+  const index = segments.lastIndexOf("documents");
+  const owner = segments
+    .slice(0, index)
+    .filter((segment) => !isParameterSegment(segment))
+    .at(-1);
+  if (index < 1 || !owner) throw new Error(`Cannot find the record that owns ${path}`);
+  return { operation: segments.slice(index + 1).join("/"), resource: normalizeName(owner) };
 }
 
 function makeInternalName(method: string, path: string): string {
-  return normalizeName(`${method}_${path.replace(/^\/api\/v1\//, "")}`);
+  return normalizeName(`${method}_${relativePath(path)}`);
+}
+
+function sortRecord<T>(record: Record<string, T>): Record<string, T> {
+  return Object.fromEntries(
+    Object.entries(record).sort(([left], [right]) => left.localeCompare(right)),
+  );
 }
 
 async function main(): Promise<void> {
@@ -198,10 +261,18 @@ async function main(): Promise<void> {
     string,
     { operations: Partial<Record<ResourceOperation, CatalogOperation>>; title: string }
   > = {};
+  const actions: Record<string, CatalogOperation> = {};
+  const documents: Record<string, Partial<Record<DocumentOperation, CatalogOperation>>> = {};
   const issuingMaterials: Record<string, CatalogOperation> = {};
   const reports: Record<string, CatalogOperation> = {};
   const undocumented: Record<string, CatalogOperation> = {};
-  let operationCount = 0;
+  const views: Record<string, CatalogOperation> = {};
+  const operations: {
+    method: HttpMethod;
+    operation: z.infer<typeof operationSchema>;
+    path: string;
+    tag: string;
+  }[] = [];
 
   for (const [path, pathItem] of Object.entries(document.paths)) {
     const unsupportedMethods = ALL_HTTP_METHODS.filter(
@@ -214,54 +285,110 @@ async function main(): Promise<void> {
     for (const method of HTTP_METHODS) {
       const rawOperation = pathItem[method];
       if (!rawOperation) continue;
-      operationCount += 1;
-
       const operation = operationSchema.parse(rawOperation);
       const tag = operation.tags[0];
       if (!tag) throw new Error(`${method.toUpperCase()} ${path} has no tag`);
+      operations.push({ method, operation, path, tag });
+    }
+  }
 
-      const catalogOperation = toCatalogOperation(
-        method,
+  for (const { method, operation, path, tag } of operations) {
+    const catalogOperation = toCatalogOperation(
+      method,
+      path,
+      operation,
+      document.components.schemas,
+    );
+
+    if (UNDOCUMENTED_TAGS.has(tag)) {
+      const name = makeInternalName(method, path);
+      if (undocumented[name]) throw new Error(`Duplicate undocumented operation ${name}`);
+      undocumented[name] = catalogOperation;
+      continue;
+    }
+
+    if (tag === "Issuing Materials") {
+      const name =
+        method === "post"
+          ? "transfer_stock_to_job"
+          : `list_${normalizeName(path.split("/").at(-1) ?? path)}`;
+      if (issuingMaterials[name]) throw new Error(`Duplicate issuing-material operation ${name}`);
+      issuingMaterials[name] = catalogOperation;
+      continue;
+    }
+
+    if (tag === "Reports") {
+      const name = method === "post" ? "create" : "get";
+      if (reports[name]) throw new Error(`Duplicate report operation ${name}`);
+      reports[name] = catalogOperation;
+      continue;
+    }
+
+    if (tag === "Documents") {
+      const owner = getDocumentOwner(path);
+      const name: DocumentOperation | undefined =
+        method === "get" && owner.operation === ""
+          ? "list"
+          : method === "post" && owner.operation === ""
+            ? "attach"
+            : method === "delete" && owner.operation === "{repositoryId}"
+              ? "detach"
+              : undefined;
+      if (!name) throw new Error(`Unrecognized document operation ${method.toUpperCase()} ${path}`);
+      const group = (documents[owner.resource] ??= {});
+      if (group[name])
+        throw new Error(`${owner.resource} has multiple document ${name} operations`);
+      group[name] = catalogOperation;
+      continue;
+    }
+
+    const siblings = operations.filter(
+      (sibling) => sibling.tag === tag && sibling.operation !== operation,
+    );
+    if (method === "get" && isView(operation, path, siblings)) {
+      const name = relativePath(path);
+      if (views[name]) throw new Error(`Duplicate view ${name}`);
+      views[name] = catalogOperation;
+      continue;
+    }
+
+    if (
+      method === "post" &&
+      isRecordAction(
         path,
-        operation,
-        document.components.schemas,
-      );
+        siblings.map((sibling) => sibling.path),
+      )
+    ) {
+      const name = relativePath(path);
+      if (actions[name]) throw new Error(`Duplicate action ${name}`);
+      actions[name] = catalogOperation;
+      continue;
+    }
 
-      if (tag === "null" || tag === "Authentication") {
-        const name = makeInternalName(method, path);
-        if (undocumented[name]) throw new Error(`Duplicate undocumented operation ${name}`);
-        undocumented[name] = catalogOperation;
-        continue;
-      }
+    const resourceOperation = getResourceOperation(method, path);
+    let resourceName = normalizeName(tag);
+    let title = tag;
+    if (resources[resourceName]?.operations[resourceOperation]) {
+      const key = catalogOperation.pathParameters.at(-1);
+      if (!key) throw new Error(`${resourceName} has multiple ${resourceOperation} operations`);
+      resourceName = `${resourceName}_by_${normalizeName(key)}`;
+      title = `${tag} by ${key}`;
+    }
+    const resource = (resources[resourceName] ??= { operations: {}, title });
+    if (resource.operations[resourceOperation]) {
+      throw new Error(`${resourceName} has multiple ${resourceOperation} operations`);
+    }
+    resource.operations[resourceOperation] = catalogOperation;
+  }
 
-      if (tag === "Issuing Materials") {
-        const name =
-          method === "post"
-            ? "transfer_stock_to_job"
-            : `list_${normalizeName(path.split("/").at(-1) ?? path)}`;
-        if (issuingMaterials[name]) throw new Error(`Duplicate issuing-material operation ${name}`);
-        issuingMaterials[name] = catalogOperation;
-        continue;
-      }
-
-      if (tag === "Reports") {
-        const name = method === "post" ? "create" : "get";
-        if (reports[name]) throw new Error(`Duplicate report operation ${name}`);
-        reports[name] = catalogOperation;
-        continue;
-      }
-
-      const resourceName = normalizeName(tag);
-      const resource = (resources[resourceName] ??= { operations: {}, title: tag });
-      const resourceOperation = getResourceOperation(method, operation);
-      if (resource.operations[resourceOperation]) {
-        throw new Error(`${resourceName} has multiple ${resourceOperation} operations`);
-      }
-      resource.operations[resourceOperation] = catalogOperation;
+  for (const resourceName of Object.keys(documents)) {
+    if (!resources[resourceName]) {
+      throw new Error(`Documents belong to unknown resource ${resourceName}`);
     }
   }
 
   const catalog = {
+    actions: sortRecord(actions),
     api: {
       openapiVersion: document.openapi,
       serverUrl: document.servers[0]?.url,
@@ -269,19 +396,13 @@ async function main(): Promise<void> {
       version: document.info.version,
     },
     documentationUrl: DOCUMENTATION_URL,
-    issuingMaterials: Object.fromEntries(
-      Object.entries(issuingMaterials).sort(([left], [right]) => left.localeCompare(right)),
-    ),
-    reports: Object.fromEntries(
-      Object.entries(reports).sort(([left], [right]) => left.localeCompare(right)),
-    ),
-    resources: Object.fromEntries(
-      Object.entries(resources).sort(([left], [right]) => left.localeCompare(right)),
-    ),
+    documents: sortRecord(documents),
+    issuingMaterials: sortRecord(issuingMaterials),
+    reports: sortRecord(reports),
+    resources: sortRecord(resources),
     sourceUrl: OPENAPI_URL,
-    undocumented: Object.fromEntries(
-      Object.entries(undocumented).sort(([left], [right]) => left.localeCompare(right)),
-    ),
+    undocumented: sortRecord(undocumented),
+    views: sortRecord(views),
   };
 
   const mappedOperationCount =
@@ -289,16 +410,19 @@ async function main(): Promise<void> {
       (count, resource) => count + Object.keys(resource.operations).length,
       0,
     ) +
+    Object.values(documents).reduce((count, group) => count + Object.keys(group).length, 0) +
+    Object.keys(actions).length +
     Object.keys(issuingMaterials).length +
     Object.keys(reports).length +
-    Object.keys(undocumented).length;
-  if (mappedOperationCount !== operationCount) {
-    throw new Error(`Mapped ${mappedOperationCount} of ${operationCount} operations`);
+    Object.keys(undocumented).length +
+    Object.keys(views).length;
+  if (mappedOperationCount !== operations.length) {
+    throw new Error(`Mapped ${mappedOperationCount} of ${operations.length} operations`);
   }
 
   await writeFile(OUTPUT_URL, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");
   console.error(
-    `Wrote ${operationCount} operations across ${Object.keys(resources).length} resources`,
+    `Wrote ${operations.length} operations: ${Object.keys(resources).length} resources, ${Object.keys(views).length} views, ${Object.keys(actions).length} actions`,
   );
 }
 
