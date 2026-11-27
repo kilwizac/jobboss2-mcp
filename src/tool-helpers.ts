@@ -18,7 +18,7 @@ const sortExpressionSchema = z
 const filterKeySchema = z
   .string()
   .regex(
-    /^[A-Za-z0-9_]+(?:\[(?:eq|ne|gte|lte|gt|lt|in|notin|null)\])?$/i,
+    /^[A-Za-z0-9_]+(?:\[(?:eq|ne|gte|lte|gt|lt|in|notin|null|cont|ncont|sw|ew)\])?$/i,
     "must be a field name with a supported JobBOSS2 filter operator",
   );
 
@@ -28,6 +28,7 @@ const filterValueSchema = z.union([filterScalarSchema, z.array(filterScalarSchem
 export const listOptionsSchema = z.object({
   fields: z.array(fieldNameSchema).min(1).optional(),
   filters: z.record(filterKeySchema, filterValueSchema).optional(),
+  includeTotalCount: z.boolean().optional(),
   skip: z.number().int().nonnegative().optional(),
   sort: z.array(sortExpressionSchema).min(1).optional(),
   take: z.number().int().min(1).max(200).optional(),
@@ -44,7 +45,7 @@ export const queryParametersSchema = z.record(z.string().min(1), filterScalarSch
 
 export type ListOptions = z.infer<typeof listOptionsSchema>;
 
-const RESERVED_LIST_PARAMETERS = new Set(["fields", "skip", "sort", "take"]);
+const RESERVED_LIST_PARAMETERS = new Set(["fields", "includetotalcount", "skip", "sort", "take"]);
 
 export function buildListQuery(options: ListOptions): Record<string, QueryValue> {
   const query: Record<string, QueryValue> = {};
@@ -52,6 +53,7 @@ export function buildListQuery(options: ListOptions): Record<string, QueryValue>
   if (options.sort) query["sort"] = options.sort.join(",");
   if (options.skip !== undefined) query["skip"] = options.skip;
   if (options.take !== undefined) query["take"] = options.take;
+  if (options.includeTotalCount) query["includeTotalCount"] = true;
 
   for (const [key, value] of Object.entries(options.filters ?? {})) {
     const normalizedKey = key.toLowerCase();

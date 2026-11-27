@@ -59,7 +59,7 @@ describe("JobBoss2Client", () => {
     expect(requests).toEqual([
       {
         authorization: "Bearer secret-token",
-        url: "https://api.example.com/api/v1/customers/A%2FB?fields=customerCode%2CcustomerDescription",
+        url: "https://api.example.com/api/v2/customers/A%2FB?fields=customerCode%2CcustomerDescription",
       },
     ]);
   });

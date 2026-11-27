@@ -43,8 +43,18 @@ describe("buildListQuery", () => {
     );
   });
 
+  it("serializes text operators and total-count requests", () => {
+    expect(
+      buildListQuery({
+        filters: { "partNumber[sw]": "AB-", "vendorName[ncont]": "Steel" },
+        includeTotalCount: true,
+      }),
+    ).toEqual({ includeTotalCount: true, "partNumber[sw]": "AB-", "vendorName[ncont]": "Steel" });
+    expect(buildListQuery({ includeTotalCount: false })).toEqual({});
+  });
+
   it("rejects bare filter keys that would override list options", () => {
-    for (const key of ["fields", "skip", "sort", "take", "Take"]) {
+    for (const key of ["fields", "includeTotalCount", "skip", "sort", "take", "Take"]) {
       expect(() => buildListQuery({ filters: { [key]: "1" } })).toThrow("would override the");
     }
     expect(buildListQuery({ filters: { "take[eq]": 5 } })).toEqual({ "take[eq]": 5 });
@@ -55,16 +65,20 @@ describe("RequestBodyValidator", () => {
   it("contains every operation from the source OpenAPI document exactly once", () => {
     const operations = [
       ...Object.values(catalog.resources).flatMap((resource) => Object.values(resource.operations)),
+      ...Object.values(catalog.documents).flatMap((group) => Object.values(group)),
+      ...Object.values(catalog.actions),
       ...Object.values(catalog.issuingMaterials),
       ...Object.values(catalog.reports),
       ...Object.values(catalog.undocumented),
+      ...Object.values(catalog.views),
     ].filter((operation) => operation !== undefined);
     const identities = new Set(
       operations.map((operation) => `${operation.method} ${operation.path}`),
     );
 
-    expect(operations).toHaveLength(142);
-    expect(identities.size).toBe(142);
+    expect(operations).toHaveLength(230);
+    expect(identities.size).toBe(230);
+    expect(operations.every((operation) => operation.path.startsWith("/api/v2/"))).toBe(true);
   });
 
   it("compiles every request schema in the generated catalog", () => {
@@ -72,6 +86,9 @@ describe("RequestBodyValidator", () => {
     let schemaCount = 0;
     const groups = [
       ...Object.values(catalog.resources).map((resource) => resource.operations),
+      ...Object.values(catalog.documents),
+      catalog.actions,
+      catalog.views,
       catalog.issuingMaterials,
       catalog.reports,
       catalog.undocumented,
@@ -89,7 +106,7 @@ describe("RequestBodyValidator", () => {
       }
     }
 
-    expect(schemaCount).toBe(38);
+    expect(schemaCount).toBe(60);
   });
 
   it("rejects fields outside a documented request schema", () => {

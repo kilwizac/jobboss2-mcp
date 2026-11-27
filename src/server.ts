@@ -9,8 +9,12 @@ import {
   type TokenProvider,
 } from "./auth.js";
 import {
+  actionNames,
   catalog,
   createResourceNames,
+  deleteResourceNames,
+  documentResourceNames,
+  getDocumentOperation,
   getResourceNames,
   getResourceOperation,
   issuingMaterialLookupNames,
@@ -19,6 +23,7 @@ import {
   stringEnum,
   undocumentedOperationNames,
   updateResourceNames,
+  viewNames,
   type CatalogOperation,
   type ResourceOperation,
 } from "./catalog.js";
@@ -51,7 +56,26 @@ type ToolContext = Readonly<{
   validator: RequestBodyValidator;
 }>;
 
-const resourceOperationSchema = z.enum(["create", "get", "list", "update"]);
+const resourceOperationSchema = z.enum(["create", "delete", "get", "list", "update"]);
+
+const documentFileSchema = z.object({
+  base64: z.base64(),
+  contentType: z.string().min(1).optional(),
+  fileName: z.string().min(1),
+});
+
+type DescribeInput = Readonly<{
+  action?: string | undefined;
+  operation?: ResourceOperation | undefined;
+  resource?: string | undefined;
+  view?: string | undefined;
+}>;
+
+type AttachDocumentInput = Readonly<{
+  file?: z.infer<typeof documentFileSchema> | undefined;
+  folderId?: number | undefined;
+  repositoryId?: number | undefined;
+}>;
 
 function createTokenProvider(config: JobBoss2Config, fetcher?: Fetcher): TokenProvider {
   if (config.auth.kind === "access_token") {
@@ -103,13 +127,37 @@ function operationDescription(operation: CatalogOperation): JsonObject {
   };
 }
 
-function describeResource(resourceName?: string, operationName?: ResourceOperation): JsonObject {
-  if (!resourceName) {
-    if (operationName) {
-      throw new JobBoss2InputError("resource is required when operation is provided");
-    }
+function describeCatalog({
+  action,
+  operation: operationName,
+  resource: resourceName,
+  view,
+}: DescribeInput): JsonObject {
+  if ([action, resourceName, view].filter((name) => name !== undefined).length > 1) {
+    throw new JobBoss2InputError("Provide only one of resource, action, or view");
+  }
+  if (operationName && !resourceName) {
+    throw new JobBoss2InputError("resource is required when operation is provided");
+  }
 
+  if (action) {
+    const operation = catalog.actions[action];
+    if (!operation) throw new JobBoss2InputError(`Unknown action ${action}`);
+    return { action, specification: operationDescription(operation) };
+  }
+
+  if (view) {
+    const operation = catalog.views[view];
+    if (!operation) throw new JobBoss2InputError(`Unknown view ${view}`);
+    return { specification: operationDescription(operation), view };
+  }
+
+  if (!resourceName) {
     return {
+      actions: Object.entries(catalog.actions).map(([name, operation]) => ({
+        name,
+        summary: operation.summary,
+      })),
       api: catalog.api,
       documentationUrl: catalog.documentationUrl,
       issuingMaterialOperations: Object.keys(catalog.issuingMaterials),
@@ -117,9 +165,14 @@ function describeResource(resourceName?: string, operationName?: ResourceOperati
       resources: Object.entries(catalog.resources).map(([name, resource]) => ({
         name,
         operations: Object.keys(resource.operations),
+        ...(catalog.documents[name] ? { documents: true } : {}),
         title: resource.title,
       })),
       sourceUrl: catalog.sourceUrl,
+      views: Object.entries(catalog.views).map(([name, operation]) => ({
+        name,
+        summary: operation.summary,
+      })),
     };
   }
 
@@ -144,11 +197,41 @@ function describeResource(resourceName?: string, operationName?: ResourceOperati
     if (operation) operations[name] = operationDescription(operation);
   }
 
+  const documentOperations = catalog.documents[resourceName];
   return {
+    ...(documentOperations
+      ? {
+          documents: Object.fromEntries(
+            Object.entries(documentOperations).map(([name, operation]) => [
+              name,
+              operationDescription(operation),
+            ]),
+          ),
+        }
+      : {}),
     name: resourceName,
     operations,
     title: resource.title,
   };
+}
+
+function toDocumentForm({ file, folderId, repositoryId }: AttachDocumentInput): FormData {
+  if ((file === undefined) === (repositoryId === undefined)) {
+    throw new JobBoss2InputError("Provide either file or repositoryId");
+  }
+  if (folderId !== undefined && file === undefined) {
+    throw new JobBoss2InputError("folderId applies only to an uploaded file");
+  }
+
+  const form = new FormData();
+  if (repositoryId !== undefined) form.append("repositoryId", String(repositoryId));
+  if (file) {
+    const bytes = Uint8Array.from(Buffer.from(file.base64, "base64"));
+    const blob = new Blob([bytes], { type: file.contentType ?? "application/octet-stream" });
+    form.append("file", blob, file.fileName);
+  }
+  if (folderId !== undefined) form.append("folderId", String(folderId));
+  return form;
 }
 
 function assertKnownQueryParameters(
@@ -168,17 +251,19 @@ function registerResourceTools(server: McpServer, context: ToolContext): void {
     {
       annotations: { idempotentHint: true, openWorldHint: false, readOnlyHint: true },
       description:
-        "List JobBOSS2 resources or inspect one resource's paths, keys, query parameters, and request schema. Call this before create or update tools.",
+        "List JobBOSS2 resources, views, and actions, or inspect one resource, view, or action's paths, keys, query parameters, and request schema. Call this before writes and before views whose query parameters you do not know.",
       inputSchema: z.object({
+        action: stringEnum(actionNames).optional(),
         operation: resourceOperationSchema.optional(),
         resource: stringEnum(resourceNames).optional(),
+        view: stringEnum(viewNames).optional(),
       }),
       outputSchema: catalogResultSchema,
       title: "Describe JobBOSS2 resource",
     },
-    async ({ operation, resource }) => {
+    async (input) => {
       try {
-        return toCatalogToolResult(describeResource(resource, operation));
+        return toCatalogToolResult(describeCatalog(input));
       } catch (error) {
         return toToolError(error);
       }
@@ -190,7 +275,7 @@ function registerResourceTools(server: McpServer, context: ToolContext): void {
     {
       annotations: { idempotentHint: true, openWorldHint: true, readOnlyHint: true },
       description:
-        "List a JobBOSS2 resource with documented fields, filters, sorting, and offset paging. Filter keys use field[operator], where operator is eq, ne, gte, lte, gt, lt, in, notin, or null.",
+        "List a JobBOSS2 resource with documented fields, filters, sorting, and offset paging. Filter keys use field[operator], where operator is eq, ne, gte, lte, gt, lt, in, notin, null, cont, ncont, sw, or ew. Results carry hasMore when more rows exist; set includeTotalCount only when the number of matching rows is needed. For counts, rankings, and totals prefer jobboss2_get_view.",
       inputSchema: listOptionsSchema.extend({ resource: stringEnum(listResourceNames) }),
       outputSchema: apiResultSchema,
       title: "List JobBOSS2 records",
@@ -294,6 +379,188 @@ function registerResourceTools(server: McpServer, context: ToolContext): void {
         const result = await context.client.request({
           body: data,
           operation,
+          pathParameters: keys,
+          signal,
+        });
+        return toApiToolResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "jobboss2_delete",
+    {
+      annotations: {
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+        readOnlyHint: false,
+      },
+      description:
+        "Delete a JobBOSS2 record such as an order, order line item, quote, quote line item, estimate, estimate routing step or material, or AP/AR invoice or invoice line. Use jobboss2_describe_resource to find the exact key names. Confirm with the user first.",
+      inputSchema: z.object({
+        keys: pathParametersSchema,
+        resource: stringEnum(deleteResourceNames),
+      }),
+      outputSchema: apiResultSchema,
+      title: "Delete a JobBOSS2 record",
+    },
+    async ({ keys, resource }, { signal }) =>
+      runApiCall(async () => {
+        requireWrites(context);
+        const result = await context.client.request({
+          operation: getResourceOperation(resource, "delete"),
+          pathParameters: keys,
+          signal,
+        });
+        return toApiToolResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "jobboss2_run_action",
+    {
+      annotations: {
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+        readOnlyHint: false,
+      },
+      description:
+        "Run a JobBOSS2 record action: copy a quote or AP/AR invoice, create an unprocessed packing list from an order, process or unprocess a packing list, set the status of every quote line, or apply a discount percent to every quote line. Request data is checked against ECI's OpenAPI schema; use jobboss2_describe_resource with action first. Actions change JobBOSS2 data and are not safe to retry blindly.",
+      inputSchema: z.object({
+        action: stringEnum(actionNames),
+        data: jsonObjectSchema.default({}),
+        keys: pathParametersSchema,
+      }),
+      outputSchema: apiResultSchema,
+      title: "Run a JobBOSS2 record action",
+    },
+    async ({ action, data, keys }, { signal }) =>
+      runApiCall(async () => {
+        requireWrites(context);
+        const operation = catalog.actions[action];
+        if (!operation) throw new JobBoss2InputError(`Unknown action ${action}`);
+        validateBody(context, operation, data);
+        const result = await context.client.request({
+          body: data,
+          operation,
+          pathParameters: keys,
+          signal,
+        });
+        return toApiToolResult(result);
+      }),
+  );
+}
+
+function registerViewTools(server: McpServer, context: ToolContext): void {
+  server.registerTool(
+    "jobboss2_get_view",
+    {
+      annotations: { idempotentHint: true, openWorldHint: true, readOnlyHint: true },
+      description:
+        "Get a JobBOSS2 rollup, snapshot, worklist, or session view from ECI's agent-helper endpoints, such as orders/backlog-summary, jobs/{jobNumber}/snapshot, labor/hours-summary, or me/capabilities. Prefer views to paging list tools for counts, rankings, and totals. Put path keys in keys and the view's documented query parameters in query; jobboss2_describe_resource with view lists them. Many views need a JobBOSS2 report privilege, so do not retry a 403.",
+      inputSchema: z.object({
+        keys: pathParametersSchema.default({}),
+        query: queryParametersSchema.default({}),
+        view: stringEnum(viewNames),
+      }),
+      outputSchema: apiResultSchema,
+      title: "Get a JobBOSS2 view",
+    },
+    async ({ keys, query, view }, { signal }) =>
+      runApiCall(async () => {
+        const operation = catalog.views[view];
+        if (!operation) throw new JobBoss2InputError(`Unknown view ${view}`);
+        assertKnownQueryParameters(operation, query);
+        const result = await context.client.request({
+          operation,
+          pathParameters: keys,
+          query,
+          signal,
+        });
+        return toApiToolResult(result);
+      }),
+  );
+}
+
+function registerDocumentTools(server: McpServer, context: ToolContext): void {
+  const resource = stringEnum(documentResourceNames);
+
+  server.registerTool(
+    "jobboss2_list_documents",
+    {
+      annotations: { idempotentHint: true, openWorldHint: true, readOnlyHint: true },
+      description:
+        "List the documents attached to an estimate, order line item, quote line item, AR invoice line, or AP invoice. Use jobboss2_describe_resource to find the record's key names.",
+      inputSchema: z.object({ keys: pathParametersSchema, resource }),
+      outputSchema: apiResultSchema,
+      title: "List JobBOSS2 record documents",
+    },
+    async ({ keys, resource: resourceName }, { signal }) =>
+      runApiCall(async () => {
+        const result = await context.client.request({
+          operation: getDocumentOperation(resourceName, "list"),
+          pathParameters: keys,
+          signal,
+        });
+        return toApiToolResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "jobboss2_attach_document",
+    {
+      annotations: {
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+        readOnlyHint: false,
+      },
+      description:
+        "Attach a document to an estimate, order line item, quote line item, AR invoice line, or AP invoice. Send repositoryId to link a file already in the JobBOSS2 document repository, or file with base64 content to upload a new one, optionally into folderId from the repository-folders view.",
+      inputSchema: z.object({
+        file: documentFileSchema.optional(),
+        folderId: z.number().int().positive().optional(),
+        keys: pathParametersSchema,
+        repositoryId: z.number().int().positive().optional(),
+        resource,
+      }),
+      outputSchema: apiResultSchema,
+      title: "Attach a JobBOSS2 document",
+    },
+    async ({ keys, resource: resourceName, ...document }, { signal }) =>
+      runApiCall(async () => {
+        requireWrites(context);
+        const result = await context.client.request({
+          body: toDocumentForm(document),
+          operation: getDocumentOperation(resourceName, "attach"),
+          pathParameters: keys,
+          signal,
+        });
+        return toApiToolResult(result);
+      }),
+  );
+
+  server.registerTool(
+    "jobboss2_detach_document",
+    {
+      annotations: {
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+        readOnlyHint: false,
+      },
+      description:
+        "Remove a document link from an estimate, order line item, quote line item, AR invoice line, or AP invoice. keys must include the record keys and the document's repositoryId from jobboss2_list_documents.",
+      inputSchema: z.object({ keys: pathParametersSchema, resource }),
+      outputSchema: apiResultSchema,
+      title: "Detach a JobBOSS2 document",
+    },
+    async ({ keys, resource: resourceName }, { signal }) =>
+      runApiCall(async () => {
+        requireWrites(context);
+        const result = await context.client.request({
+          operation: getDocumentOperation(resourceName, "detach"),
           pathParameters: keys,
           signal,
         });
@@ -416,7 +683,7 @@ function registerUndocumentedTool(server: McpServer, context: ToolContext): void
         readOnlyHint: false,
       },
       description:
-        "Call an APS, ShopView, or OAuth-exchange operation that appears in ECI's OpenAPI document without a summary or response schema. Use only with separate ECI documentation.",
+        "Call an APS or ShopView operation that ECI's OpenAPI document lists without request or response schemas. Use only with separate ECI documentation.",
       inputSchema: z.object({
         body: z.json().optional(),
         operation: stringEnum(undocumentedOperationNames),
@@ -465,11 +732,13 @@ export function createJobBoss2Server(
     { name: "jobboss2-mcp", version: SERVER_VERSION },
     {
       instructions:
-        "Use jobboss2_describe_resource before writes. JobBOSS2 dates are UTC. Page list calls with skip and take. Never retry stock transfers without checking the result.",
+        "Call jobboss2_get_view with me/capabilities once per session, and with me/calendar-context before answering about a relative period such as last week or year to date. Prefer views to paging list tools for counts, rankings, and totals. Use jobboss2_describe_resource before writes. JobBOSS2 dates are UTC. Page list calls with skip and take while hasMore is true. Do not retry a 403. Never retry stock transfers, actions, or deletes without checking the result.",
     },
   );
 
   registerResourceTools(server, context);
+  registerViewTools(server, context);
+  registerDocumentTools(server, context);
   registerIssuingMaterialTools(server, context);
   registerReportTools(server, context);
   if (config.enableUndocumented) registerUndocumentedTool(server, context);

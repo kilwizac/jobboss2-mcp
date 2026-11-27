@@ -6,15 +6,20 @@ export {
   type TokenProvider,
 } from "./auth.js";
 export {
+  actionNames,
   catalog,
   createResourceNames,
+  deleteResourceNames,
+  documentResourceNames,
   getResourceNames,
   issuingMaterialLookupNames,
   listResourceNames,
   resourceNames,
   updateResourceNames,
+  viewNames,
   type Catalog,
   type CatalogOperation,
+  type DocumentOperation,
   type Resource,
   type ResourceOperation,
 } from "./catalog.js";
